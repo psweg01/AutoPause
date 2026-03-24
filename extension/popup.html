@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AutoPause</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      }
+
+      body {
+        margin: 0;
+        min-width: 280px;
+        background: linear-gradient(180deg, #f7f4eb 0%, #f0ece1 100%);
+        color: #1d2a22;
+      }
+
+      main {
+        padding: 16px;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: 17px;
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .toggle {
+        appearance: none;
+        width: 42px;
+        height: 24px;
+        border-radius: 999px;
+        background: #9da7a0;
+        position: relative;
+        cursor: pointer;
+        transition: background 120ms ease;
+      }
+
+      .toggle::after {
+        content: "";
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #ffffff;
+        transition: transform 120ms ease;
+      }
+
+      .toggle:checked {
+        background: #26664d;
+      }
+
+      .toggle:checked::after {
+        transform: translateX(18px);
+      }
+
+      .panel {
+        margin-top: 14px;
+        padding: 12px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.65);
+      }
+
+      .status-label {
+        font-size: 12px;
+        color: #526159;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .status-value {
+        margin-top: 6px;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="row">
+        <h1>AutoPause</h1>
+        <input id="enabled" class="toggle" type="checkbox" aria-label="Enable AutoPause">
+      </div>
+      <div class="panel">
+        <div class="status-label">Status</div>
+        <div id="status" class="status-value">Loading...</div>
+      </div>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
