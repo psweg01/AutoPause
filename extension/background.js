@@ -2,12 +2,29 @@ const extensionApi = globalThis.browser ?? globalThis.chrome;
 
 const DEFAULT_RESUME_DELAY_MS = 1500;
 const COMPETITOR_TTL_MS = 5000;
+const DEFAULT_MAIN_PLAYER_ID = "youtubeMusic";
+
+const PLAYER_CONFIGS = {
+  youtubeMusic: {
+    id: "youtubeMusic",
+    label: "YouTube Music",
+    origin: "https://music.youtube.com/",
+    matchPattern: "https://music.youtube.com/*"
+  },
+  spotify: {
+    id: "spotify",
+    label: "Spotify",
+    origin: "https://open.spotify.com/",
+    matchPattern: "https://open.spotify.com/*"
+  }
+};
 
 const runtimeState = {
   enabled: true,
   resumeDelayMs: DEFAULT_RESUME_DELAY_MS,
-  managedYtmTabId: null,
-  ytmTabs: new Map(),
+  mainPlayerId: DEFAULT_MAIN_PLAYER_ID,
+  managedPlayerTabId: null,
+  playerTabs: new Map(),
   competitors: new Map(),
   autoPauseSession: null,
   resumeTimer: null,
@@ -18,16 +35,48 @@ function token() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function normalizePlayerId(playerId) {
+  return PLAYER_CONFIGS[playerId] ? playerId : DEFAULT_MAIN_PLAYER_ID;
+}
+
+function playerConfig(playerId = runtimeState.mainPlayerId) {
+  return PLAYER_CONFIGS[normalizePlayerId(playerId)];
+}
+
+function availablePlayers() {
+  return Object.values(PLAYER_CONFIGS).map(({ id, label }) => ({ id, label }));
+}
+
+function getPlayerIdForUrl(url) {
+  for (const config of Object.values(PLAYER_CONFIGS)) {
+    if (url?.startsWith(config.origin)) {
+      return config.id;
+    }
+  }
+
+  return null;
+}
+
+function safeOriginFromUrl(url) {
+  try {
+    return new URL(url).origin;
+  } catch (_error) {
+    return "";
+  }
+}
+
 async function loadSettings() {
   const stored = await extensionApi.storage.local.get({
     enabled: true,
-    resumeDelayMs: DEFAULT_RESUME_DELAY_MS
+    resumeDelayMs: DEFAULT_RESUME_DELAY_MS,
+    mainPlayerId: DEFAULT_MAIN_PLAYER_ID
   });
 
   runtimeState.enabled = stored.enabled;
   runtimeState.resumeDelayMs = Number.isFinite(stored.resumeDelayMs)
     ? stored.resumeDelayMs
     : DEFAULT_RESUME_DELAY_MS;
+  runtimeState.mainPlayerId = normalizePlayerId(stored.mainPlayerId);
 }
 
 async function saveEnabled(enabled) {
@@ -38,6 +87,13 @@ async function saveEnabled(enabled) {
     cancelResumeTimer();
     runtimeState.autoPauseSession = null;
   }
+}
+
+async function saveMainPlayerId(mainPlayerId) {
+  runtimeState.mainPlayerId = normalizePlayerId(mainPlayerId);
+  runtimeState.autoPauseSession = null;
+  cancelResumeTimer();
+  await extensionApi.storage.local.set({ mainPlayerId: runtimeState.mainPlayerId });
 }
 
 function cancelResumeTimer() {
@@ -88,24 +144,29 @@ function activeCompetitorEntries() {
   return [...runtimeState.competitors.values()].filter((entry) => entry.active);
 }
 
-function isManagedYtmTab(tabId) {
-  return runtimeState.managedYtmTabId !== null && runtimeState.managedYtmTabId === tabId;
+function isManagedPlayerTab(tabId) {
+  return runtimeState.managedPlayerTabId !== null && runtimeState.managedPlayerTabId === tabId;
 }
 
-function getManagedYtmState() {
-  if (runtimeState.managedYtmTabId === null) {
+function getManagedPlayerState() {
+  if (runtimeState.managedPlayerTabId === null) {
     return null;
   }
 
-  return runtimeState.ytmTabs.get(runtimeState.managedYtmTabId) ?? null;
+  return runtimeState.playerTabs.get(runtimeState.managedPlayerTabId) ?? null;
 }
 
-function chooseManagedYtmTab() {
+function chooseManagedPlayerTab() {
   let bestPlaying = null;
   let bestRecent = null;
 
-  for (const [tabId, state] of runtimeState.ytmTabs.entries()) {
-    if (!state.url?.startsWith("https://music.youtube.com/")) {
+  for (const [tabId, state] of runtimeState.playerTabs.entries()) {
+    if (state.playerId !== runtimeState.mainPlayerId) {
+      continue;
+    }
+
+    const config = playerConfig(state.playerId);
+    if (!state.url?.startsWith(config.origin)) {
       continue;
     }
 
@@ -126,18 +187,18 @@ function chooseManagedYtmTab() {
     }
   }
 
-  runtimeState.managedYtmTabId = bestPlaying?.tabId ?? bestRecent?.tabId ?? null;
+  runtimeState.managedPlayerTabId = bestPlaying?.tabId ?? bestRecent?.tabId ?? null;
 }
 
-async function sendYtmCommand(command, customToken = token()) {
-  const tabId = runtimeState.managedYtmTabId;
+async function sendPlayerCommand(command, customToken = token()) {
+  const tabId = runtimeState.managedPlayerTabId;
   if (tabId === null) {
     return { ok: false, reason: "no-managed-tab" };
   }
 
   try {
     await extensionApi.tabs.sendMessage(tabId, {
-      type: "ytm-command",
+      type: "player-command",
       command,
       token: customToken
     });
@@ -151,19 +212,19 @@ async function sendYtmCommand(command, customToken = token()) {
   }
 }
 
-async function maybePauseManagedYtm(reason) {
+async function maybePauseManagedPlayer(reason) {
   if (!runtimeState.enabled || runtimeState.autoPauseSession !== null) {
     return;
   }
 
-  const ytmState = getManagedYtmState();
-  if (!ytmState?.playing) {
+  const managedState = getManagedPlayerState();
+  if (!managedState?.playing) {
     return;
   }
 
   const pauseToken = token();
   runtimeState.autoPauseSession = {
-    tabId: runtimeState.managedYtmTabId,
+    tabId: runtimeState.managedPlayerTabId,
     pauseToken,
     pausedAt: Date.now(),
     cancelled: false,
@@ -171,19 +232,19 @@ async function maybePauseManagedYtm(reason) {
     reason
   };
 
-  const result = await sendYtmCommand("pause", pauseToken);
+  const result = await sendPlayerCommand("pause", pauseToken);
   if (!result.ok) {
     runtimeState.autoPauseSession = null;
   }
 }
 
-async function maybeResumeManagedYtm(reason) {
+async function maybeResumeManagedPlayer(reason) {
   const session = runtimeState.autoPauseSession;
   if (!runtimeState.enabled || session === null || session.cancelled || session.resumeIssued) {
     return;
   }
 
-  if (runtimeState.managedYtmTabId !== session.tabId) {
+  if (runtimeState.managedPlayerTabId !== session.tabId) {
     runtimeState.autoPauseSession = null;
     return;
   }
@@ -195,7 +256,7 @@ async function maybeResumeManagedYtm(reason) {
 
   session.resumeIssued = true;
   const playToken = token();
-  const result = await sendYtmCommand("play", playToken);
+  const result = await sendPlayerCommand("play", playToken);
 
   if (!result.ok) {
     runtimeState.autoPauseSession = null;
@@ -214,7 +275,7 @@ function scheduleResume(reason) {
   cancelResumeTimer();
   runtimeState.resumeTimer = setTimeout(() => {
     runtimeState.resumeTimer = null;
-    void maybeResumeManagedYtm(reason);
+    void maybeResumeManagedPlayer(reason);
   }, runtimeState.resumeDelayMs);
 }
 
@@ -223,7 +284,7 @@ function evaluateCompetitorState(reason) {
 
   if (activeCompetitors.length > 0) {
     cancelResumeTimer();
-    void maybePauseManagedYtm(reason);
+    void maybePauseManagedPlayer(reason);
     return;
   }
 
@@ -238,13 +299,48 @@ function removeCompetitorsForTab(tabId) {
   }
 }
 
+function setCompetitorEntry(entry) {
+  if (!entry.active) {
+    runtimeState.competitors.delete(entry.sourceId);
+    return;
+  }
+
+  runtimeState.competitors.set(entry.sourceId, entry);
+  scheduleStaleSweep();
+}
+
+function syncPlayerTabCompetitorState(state) {
+  const sourceId = `player-tab:${state.tabId}`;
+
+  if (state.playerId === runtimeState.mainPlayerId) {
+    runtimeState.competitors.delete(sourceId);
+    return;
+  }
+
+  setCompetitorEntry({
+    sourceId,
+    tabId: state.tabId,
+    frameId: 0,
+    url: state.url ?? "",
+    origin: safeOriginFromUrl(state.url),
+    active: Boolean(state.playing),
+    lastSeenAt: Date.now()
+  });
+}
+
+function syncAllPlayerCompetitors() {
+  for (const state of runtimeState.playerTabs.values()) {
+    syncPlayerTabCompetitorState(state);
+  }
+}
+
 function handleCompetitorState(message, sender) {
   const tabId = sender.tab?.id;
   if (tabId === undefined) {
     return;
   }
 
-  if (isManagedYtmTab(tabId)) {
+  if (isManagedPlayerTab(tabId)) {
     return;
   }
 
@@ -259,26 +355,22 @@ function handleCompetitorState(message, sender) {
     lastSeenAt: Date.now()
   };
 
-  if (!entry.active) {
-    runtimeState.competitors.delete(sourceId);
-  } else {
-    runtimeState.competitors.set(sourceId, entry);
-    scheduleStaleSweep();
-  }
-
+  setCompetitorEntry(entry);
   evaluateCompetitorState("competitor-state");
 }
 
-function handleYtmState(message, sender) {
+function handlePlayerState(message, sender) {
   const tabId = sender.tab?.id;
   if (tabId === undefined) {
     return;
   }
 
-  const current = runtimeState.ytmTabs.get(tabId) ?? {};
+  const playerId = normalizePlayerId(message.playerId ?? getPlayerIdForUrl(message.url ?? sender.url ?? sender.tab?.url ?? ""));
+  const current = runtimeState.playerTabs.get(tabId) ?? {};
   const next = {
     ...current,
     tabId,
+    playerId,
     url: message.url ?? sender.url ?? sender.tab?.url ?? "",
     playing: Boolean(message.playing),
     currentTime: Number.isFinite(message.currentTime) ? message.currentTime : 0,
@@ -288,11 +380,12 @@ function handleYtmState(message, sender) {
     lastPlayingAt: message.playing ? Date.now() : current.lastPlayingAt ?? null
   };
 
-  runtimeState.ytmTabs.set(tabId, next);
-  chooseManagedYtmTab();
+  runtimeState.playerTabs.set(tabId, next);
+  chooseManagedPlayerTab();
+  syncPlayerTabCompetitorState(next);
 
   const session = runtimeState.autoPauseSession;
-  if (session !== null && tabId === session.tabId) {
+  if (session !== null && tabId === session.tabId && playerId === runtimeState.mainPlayerId) {
     if (message.cause === "extension" && message.token === session.pauseToken && !message.playing) {
       session.pauseConfirmedAt = Date.now();
     }
@@ -307,12 +400,12 @@ function handleYtmState(message, sender) {
     }
   }
 
-  if (message.playing) {
-    evaluateCompetitorState("ytm-started-playing");
+  if (message.playing || playerId !== runtimeState.mainPlayerId) {
+    evaluateCompetitorState("player-state");
   }
 }
 
-function handleYtmUserInteraction(message, sender) {
+function handlePlayerUserInteraction(message, sender) {
   const tabId = sender.tab?.id;
   if (tabId === undefined || runtimeState.autoPauseSession === null) {
     return;
@@ -328,7 +421,7 @@ function handleYtmUserInteraction(message, sender) {
   }
 }
 
-function handleYtmCommandResult(message, sender) {
+function handlePlayerCommandResult(message, sender) {
   const tabId = sender.tab?.id;
   if (tabId === undefined || runtimeState.autoPauseSession === null) {
     return;
@@ -345,11 +438,15 @@ function handleYtmCommandResult(message, sender) {
 }
 
 async function handlePopupGetStatus() {
+  const selectedPlayer = playerConfig();
   return {
     enabled: runtimeState.enabled,
-    managedYtmFound: runtimeState.managedYtmTabId !== null,
-    managedYtmTabId: runtimeState.managedYtmTabId,
-    competingAudioActive: activeCompetitorEntries().length > 0
+    mainPlayerId: runtimeState.mainPlayerId,
+    mainPlayerLabel: selectedPlayer.label,
+    managedPlayerFound: runtimeState.managedPlayerTabId !== null,
+    managedPlayerTabId: runtimeState.managedPlayerTabId,
+    competingAudioActive: activeCompetitorEntries().length > 0,
+    availablePlayers: availablePlayers()
   };
 }
 
@@ -363,24 +460,41 @@ async function handlePopupSetEnabled(message) {
   return handlePopupGetStatus();
 }
 
-async function bootstrapYtmTabs() {
+async function handlePopupSetMainPlayer(message) {
+  await saveMainPlayerId(message.mainPlayerId);
+  chooseManagedPlayerTab();
+  syncAllPlayerCompetitors();
+  if (runtimeState.enabled) {
+    evaluateCompetitorState("main-player-changed");
+  }
+  return handlePopupGetStatus();
+}
+
+async function requestPlayerState(tabId) {
   try {
-    const tabs = await extensionApi.tabs.query({ url: ["https://music.youtube.com/*"] });
+    await extensionApi.tabs.sendMessage(tabId, {
+      type: "player-command",
+      command: "state-request",
+      token: token()
+    });
+  } catch (_error) {
+    return;
+  }
+}
+
+async function bootstrapPlayerTabs() {
+  try {
+    const tabs = await extensionApi.tabs.query({
+      url: Object.values(PLAYER_CONFIGS).map((config) => config.matchPattern)
+    });
+
     await Promise.all(
       tabs.map(async (tab) => {
         if (tab.id === undefined) {
           return;
         }
 
-        try {
-          await extensionApi.tabs.sendMessage(tab.id, {
-            type: "ytm-command",
-            command: "state-request",
-            token: token()
-          });
-        } catch (_error) {
-          return;
-        }
+        await requestPlayerState(tab.id);
       })
     );
   } catch (_error) {
@@ -389,13 +503,19 @@ async function bootstrapYtmTabs() {
 }
 
 extensionApi.runtime.onInstalled.addListener(() => {
-  void loadSettings();
-  void bootstrapYtmTabs();
+  void loadSettings().then(() => {
+    chooseManagedPlayerTab();
+    syncAllPlayerCompetitors();
+  });
+  void bootstrapPlayerTabs();
 });
 
 extensionApi.runtime.onStartup?.addListener(() => {
-  void loadSettings();
-  void bootstrapYtmTabs();
+  void loadSettings().then(() => {
+    chooseManagedPlayerTab();
+    syncAllPlayerCompetitors();
+  });
+  void bootstrapPlayerTabs();
 });
 
 extensionApi.runtime.onMessage.addListener((message, sender) => {
@@ -403,30 +523,32 @@ extensionApi.runtime.onMessage.addListener((message, sender) => {
     case "competitor-media-state":
       handleCompetitorState(message, sender);
       return undefined;
-    case "ytm-state":
-      handleYtmState(message, sender);
+    case "player-state":
+      handlePlayerState(message, sender);
       return undefined;
-    case "ytm-user-interaction":
-      handleYtmUserInteraction(message, sender);
+    case "player-user-interaction":
+      handlePlayerUserInteraction(message, sender);
       return undefined;
-    case "ytm-command-result":
-      handleYtmCommandResult(message, sender);
+    case "player-command-result":
+      handlePlayerCommandResult(message, sender);
       return undefined;
     case "popup-get-status":
       return handlePopupGetStatus();
     case "popup-set-enabled":
       return handlePopupSetEnabled(message);
+    case "popup-set-main-player":
+      return handlePopupSetMainPlayer(message);
     default:
       return undefined;
   }
 });
 
 extensionApi.tabs.onRemoved.addListener((tabId) => {
-  runtimeState.ytmTabs.delete(tabId);
+  runtimeState.playerTabs.delete(tabId);
   removeCompetitorsForTab(tabId);
 
-  if (runtimeState.managedYtmTabId === tabId) {
-    runtimeState.managedYtmTabId = null;
+  if (runtimeState.managedPlayerTabId === tabId) {
+    runtimeState.managedPlayerTabId = null;
   }
 
   if (runtimeState.autoPauseSession?.tabId === tabId) {
@@ -434,27 +556,35 @@ extensionApi.tabs.onRemoved.addListener((tabId) => {
     cancelResumeTimer();
   }
 
-  chooseManagedYtmTab();
+  chooseManagedPlayerTab();
   evaluateCompetitorState("tab-removed");
 });
 
 extensionApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.url && !changeInfo.url.startsWith("https://music.youtube.com/")) {
-    runtimeState.ytmTabs.delete(tabId);
-    if (runtimeState.managedYtmTabId === tabId) {
-      runtimeState.managedYtmTabId = null;
+  if (changeInfo.url) {
+    const nextPlayerId = getPlayerIdForUrl(changeInfo.url);
+    if (!nextPlayerId) {
+      runtimeState.playerTabs.delete(tabId);
+      removeCompetitorsForTab(tabId);
+      if (runtimeState.managedPlayerTabId === tabId) {
+        runtimeState.managedPlayerTabId = null;
+      }
+      chooseManagedPlayerTab();
+      evaluateCompetitorState("tab-url-changed");
+      return;
     }
-    chooseManagedYtmTab();
   }
 
-  if (changeInfo.status === "complete" && tab.url?.startsWith("https://music.youtube.com/")) {
-    void extensionApi.tabs.sendMessage(tabId, {
-      type: "ytm-command",
-      command: "state-request",
-      token: token()
-    }).catch(() => undefined);
+  if (changeInfo.status === "complete") {
+    const playerId = getPlayerIdForUrl(tab.url ?? changeInfo.url ?? "");
+    if (playerId) {
+      void requestPlayerState(tabId);
+    }
   }
 });
 
-void loadSettings();
-void bootstrapYtmTabs();
+void loadSettings().then(() => {
+  chooseManagedPlayerTab();
+  syncAllPlayerCompetitors();
+});
+void bootstrapPlayerTabs();

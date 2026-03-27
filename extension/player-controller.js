@@ -1,11 +1,20 @@
 const extensionApi = globalThis.browser ?? globalThis.chrome;
 
+const PLAYER_HOSTS = {
+  "music.youtube.com": "youtubeMusic",
+  "open.spotify.com": "spotify"
+};
+
 const observedMedia = new WeakSet();
 const expectedCommandTokens = new Map();
 
 let currentAutoPauseToken = null;
 let lastReportSignature = null;
 let lastTimeUpdateAt = 0;
+
+function detectPlayerId() {
+  return PLAYER_HOSTS[location.hostname] ?? null;
+}
 
 function allMediaElements() {
   return [...document.querySelectorAll("audio, video")];
@@ -69,9 +78,10 @@ function classifyCause(playingNow) {
 }
 
 function reportState(reason, force = false) {
+  const playerId = detectPlayerId();
   const { player, playing, currentTime } = currentPlayerState();
   const causeInfo = classifyCause(playing);
-  const signature = `${playing}:${Math.floor(currentTime)}:${causeInfo.cause}:${causeInfo.token ?? ""}`;
+  const signature = `${playerId}:${playing}:${Math.floor(currentTime)}:${causeInfo.cause}:${causeInfo.token ?? ""}`;
 
   if (!force && signature === lastReportSignature && reason !== "state-request") {
     return;
@@ -80,7 +90,8 @@ function reportState(reason, force = false) {
   lastReportSignature = signature;
 
   extensionApi.runtime.sendMessage({
-    type: "ytm-state",
+    type: "player-state",
+    playerId,
     url: location.href,
     playing,
     currentTime,
@@ -144,8 +155,9 @@ function registerInteractionCancellation() {
     currentAutoPauseToken = null;
 
     extensionApi.runtime.sendMessage({
-      type: "ytm-user-interaction",
+      type: "player-user-interaction",
       token,
+      playerId: detectPlayerId(),
       url: location.href
     }).catch(() => undefined);
   };
@@ -155,6 +167,7 @@ function registerInteractionCancellation() {
 }
 
 async function runCommand(message) {
+  const playerId = detectPlayerId();
   const { player } = currentPlayerState();
 
   if (message.command === "state-request") {
@@ -164,7 +177,8 @@ async function runCommand(message) {
 
   if (!player) {
     extensionApi.runtime.sendMessage({
-      type: "ytm-command-result",
+      type: "player-command-result",
+      playerId,
       command: message.command,
       token: message.token,
       ok: false,
@@ -188,7 +202,8 @@ async function runCommand(message) {
     }
 
     extensionApi.runtime.sendMessage({
-      type: "ytm-command-result",
+      type: "player-command-result",
+      playerId,
       command: message.command,
       token: message.token,
       ok: true
@@ -200,7 +215,8 @@ async function runCommand(message) {
     }
 
     extensionApi.runtime.sendMessage({
-      type: "ytm-command-result",
+      type: "player-command-result",
+      playerId,
       command: message.command,
       token: message.token,
       ok: false,
@@ -210,7 +226,7 @@ async function runCommand(message) {
 }
 
 extensionApi.runtime.onMessage.addListener((message) => {
-  if (message?.type !== "ytm-command") {
+  if (message?.type !== "player-command") {
     return undefined;
   }
 

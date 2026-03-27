@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "AutoPause for YouTube Music",
+  "name": "AutoPause",
   "version": "0.1.0",
-  "description": "Pauses YouTube Music when another Safari tab starts playing HTML media, then resumes it after the other audio stops.",
+  "description": "Pauses your selected music player when another Safari tab starts playing HTML media, then resumes it after the other audio stops.",
   "permissions": [
     "tabs",
     "storage"
   ],
   "host_permissions": [
     "https://music.youtube.com/*",
+    "https://open.spotify.com/*",
     "<all_urls>"
   ],
   "background": {
@@ -21,10 +22,11 @@
   "content_scripts": [
     {
       "matches": [
-        "https://music.youtube.com/*"
+        "https://music.youtube.com/*",
+        "https://open.spotify.com/*"
       ],
       "js": [
-        "ytm-controller.js"
+        "player-controller.js"
       ],
       "run_at": "document_idle"
     },
@@ -33,7 +35,8 @@
         "<all_urls>"
       ],
       "exclude_matches": [
-        "https://music.youtube.com/*"
+        "https://music.youtube.com/*",
+        "https://open.spotify.com/*"
       ],
       "js": [
         "media-observer.js"
