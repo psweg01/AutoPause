@@ -7,6 +7,7 @@ const PLAYER_HOSTS = {
 
 const observedMedia = new WeakSet();
 const expectedCommandTokens = new Map();
+const stateRefreshTimers = new Set();
 
 let currentAutoPauseToken = null;
 let lastReportSignature = null;
@@ -16,8 +17,70 @@ function detectPlayerId() {
   return PLAYER_HOSTS[location.hostname] ?? null;
 }
 
+function collectSearchRoots(root = document, roots = []) {
+  roots.push(root);
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let node = walker.nextNode();
+  while (node) {
+    if (node.shadowRoot) {
+      collectSearchRoots(node.shadowRoot, roots);
+    }
+
+    node = walker.nextNode();
+  }
+
+  return roots;
+}
+
+function deepQueryAll(selector) {
+  return collectSearchRoots().flatMap((root) => [...root.querySelectorAll(selector)]);
+}
+
 function allMediaElements() {
-  return [...document.querySelectorAll("audio, video")];
+  return deepQueryAll("audio, video");
+}
+
+function spotifyPlayPauseButton() {
+  return deepQueryAll('button[data-testid="control-button-playpause"]').find(Boolean) ?? null;
+}
+
+function spotifyPlayingFromButton(button) {
+  if (!button) {
+    return null;
+  }
+
+  const labels = [
+    button.getAttribute("aria-label"),
+    button.getAttribute("title"),
+    button.textContent
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .trim()
+    .toLowerCase();
+
+  if (!labels) {
+    return null;
+  }
+
+  if (labels.includes("pause")) {
+    return true;
+  }
+
+  if (labels.includes("play")) {
+    return false;
+  }
+
+  return null;
+}
+
+function mediaSessionPlaybackState() {
+  try {
+    return navigator.mediaSession?.playbackState ?? "none";
+  } catch (_error) {
+    return "none";
+  }
 }
 
 function pickActiveMediaElement() {
@@ -44,10 +107,26 @@ function pickActiveMediaElement() {
 }
 
 function currentPlayerState() {
+  const playerId = detectPlayerId();
   const player = pickActiveMediaElement();
+  const playPauseButton = playerId === "spotify" ? spotifyPlayPauseButton() : null;
+  const mediaSessionState = mediaSessionPlaybackState();
+  const buttonPlaying = spotifyPlayingFromButton(playPauseButton);
+
+  let playing = Boolean(player && !player.paused && !player.ended);
+  if (!playing && mediaSessionState === "playing") {
+    playing = true;
+  }
+
+  if (buttonPlaying !== null) {
+    playing = buttonPlaying;
+  }
+
   return {
+    playerId,
     player,
-    playing: Boolean(player && !player.paused && !player.ended),
+    playPauseButton,
+    playing,
     currentTime: Number(player?.currentTime ?? 0)
   };
 }
@@ -78,10 +157,17 @@ function classifyCause(playingNow) {
 }
 
 function reportState(reason, force = false) {
-  const playerId = detectPlayerId();
-  const { player, playing, currentTime } = currentPlayerState();
+  const { playerId, player, playing, currentTime, playPauseButton } = currentPlayerState();
   const causeInfo = classifyCause(playing);
-  const signature = `${playerId}:${playing}:${Math.floor(currentTime)}:${causeInfo.cause}:${causeInfo.token ?? ""}`;
+  const signature = [
+    playerId,
+    playing,
+    Math.floor(currentTime),
+    Boolean(player),
+    Boolean(playPauseButton),
+    causeInfo.cause,
+    causeInfo.token ?? ""
+  ].join(":");
 
   if (!force && signature === lastReportSignature && reason !== "state-request") {
     return;
@@ -98,7 +184,8 @@ function reportState(reason, force = false) {
     cause: causeInfo.cause,
     token: causeInfo.token,
     reason,
-    hasPlayer: Boolean(player)
+    hasPlayer: Boolean(player),
+    hasPlayPauseButton: Boolean(playPauseButton)
   }).catch(() => undefined);
 }
 
@@ -166,23 +253,38 @@ function registerInteractionCancellation() {
   window.addEventListener("keydown", cancelAutoResume, true);
 }
 
+function scheduleStateRefresh(reason) {
+  for (const delayMs of [120, 500, 1200]) {
+    const timer = setTimeout(() => {
+      stateRefreshTimers.delete(timer);
+      reportState(reason, true);
+    }, delayMs);
+
+    stateRefreshTimers.add(timer);
+  }
+}
+
+function clickButton(button) {
+  button.click();
+}
+
 async function runCommand(message) {
-  const playerId = detectPlayerId();
-  const { player } = currentPlayerState();
+  const state = currentPlayerState();
+  const { playerId, player, playPauseButton, playing } = state;
 
   if (message.command === "state-request") {
     reportState("state-request", true);
     return;
   }
 
-  if (!player) {
+  if (!player && !playPauseButton) {
     extensionApi.runtime.sendMessage({
       type: "player-command-result",
       playerId,
       command: message.command,
       token: message.token,
       ok: false,
-      error: "No active media element found"
+      error: "No controllable player found"
     }).catch(() => undefined);
     return;
   }
@@ -194,12 +296,22 @@ async function runCommand(message) {
 
   try {
     if (message.command === "pause") {
-      player.pause();
+      if (player) {
+        player.pause();
+      } else if (playPauseButton && playing) {
+        clickButton(playPauseButton);
+      }
       reportState("extension-pause", true);
     } else if (message.command === "play") {
-      await player.play();
+      if (player) {
+        await player.play();
+      } else if (playPauseButton && !playing) {
+        clickButton(playPauseButton);
+      }
       reportState("extension-play", true);
     }
+
+    scheduleStateRefresh(`post-${message.command}`);
 
     extensionApi.runtime.sendMessage({
       type: "player-command-result",
@@ -237,5 +349,10 @@ extensionApi.runtime.onMessage.addListener((message) => {
 scanMedia();
 observeDom();
 registerInteractionCancellation();
+if (detectPlayerId() === "spotify") {
+  setInterval(() => {
+    reportState("spotify-poll");
+  }, 1000);
+}
 window.addEventListener("pageshow", () => reportState("pageshow", true));
 window.addEventListener("focus", () => reportState("focus"));
