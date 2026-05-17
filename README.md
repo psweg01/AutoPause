@@ -37,12 +37,9 @@ xcrun safari-web-extension-converter extension \
   --macos-only
 ```
 
-> **Note:** If you get a "bundle identifier not prefixed" build error, open `AutoPause/AutoPause.xcodeproj/project.pbxproj` and change `com.yourname.AutoPause` → `com.yourname.autopause` (lowercase). This is a known converter quirk.
-
-```bash
-```
-
 Replace `com.yourname.autopause` with any reverse-domain identifier you like.
+
+> **Note:** If you get a "bundle identifier not prefixed" build error, open `AutoPause/AutoPause.xcodeproj/project.pbxproj` and change `com.yourname.AutoPause` → `com.yourname.autopause` (lowercase). This is a known converter quirk.
 
 ### 4. Open in Xcode and sign
 
